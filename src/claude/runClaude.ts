@@ -181,8 +181,15 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // Create realtime session
     const session = api.sessionSyncClient(response);
 
-    // Start Happy MCP server
-    const happyServer = await startHappyServer(session);
+    // Message queue reference - will be set after creation
+    // This allows the MCP server to inject messages into the queue
+    let messageQueueRef: MessageQueue2<EnhancedMode> | null = null;
+
+    // Start Happy MCP server with message queue getter for reminder injection
+    const happyServer = await startHappyServer(session, {
+        getMessageQueue: () => messageQueueRef,
+        defaultMode: { permissionMode: 'default' } as EnhancedMode
+    });
     logger.debug(`[START] Happy MCP server started at ${happyServer.url}`);
 
     // Variable to track current session instance (updated via onSessionReady callback)
@@ -237,6 +244,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         allowedTools: mode.allowedTools,
         disallowedTools: mode.disallowedTools
     }));
+
+    // Set the queue reference so the MCP server can inject reminders
+    messageQueueRef = messageQueue;
 
     // Forward messages to the queue
     // Permission modes: Use the unified 7-mode type, mapping happens at SDK boundary in claudeRemote.ts

@@ -12,7 +12,18 @@ import { logger } from "@/ui/logger";
 import { ApiSessionClient } from "@/api/apiSession";
 import { randomUUID } from "node:crypto";
 
-export async function startHappyServer(client: ApiSessionClient) {
+/** Callback to get the message queue for injecting messages */
+export type MessageQueueGetter<T> = () => { push: (message: string, mode: T) => void } | null;
+
+/** Options for starting the Happy MCP server */
+export interface HappyServerOptions<T> {
+    /** Getter for the message queue (set after server starts) */
+    getMessageQueue?: MessageQueueGetter<T>;
+    /** Default mode to use when injecting messages */
+    defaultMode?: T;
+}
+
+export async function startHappyServer<T>(client: ApiSessionClient, options?: HappyServerOptions<T>) {
     // Handler that sends title updates via the client
     const handler = async (title: string) => {
         logger.debug('[happyMCP] Changing title to:', title);
@@ -48,7 +59,7 @@ export async function startHappyServer(client: ApiSessionClient) {
     }, async (args) => {
         const response = await handler(args.title);
         logger.debug('[happyMCP] Response:', response);
-        
+
         if (response.success) {
             return {
                 content: [
@@ -71,6 +82,48 @@ export async function startHappyServer(client: ApiSessionClient) {
             };
         }
     });
+
+    // Register inject_reminder tool if message queue getter is provided
+    if (options?.getMessageQueue) {
+        mcp.registerTool('inject_reminder', {
+            description: 'Inject a reminder message into the conversation (e.g., for timer notifications)',
+            title: 'Inject Reminder',
+            inputSchema: {
+                message: z.string().describe('The reminder message to inject'),
+                task_id: z.string().optional().describe('Optional background task ID to reference'),
+            },
+        }, async (args) => {
+            logger.debug('[happyMCP] Injecting reminder:', args);
+
+            const queue = options.getMessageQueue?.();
+            if (!queue) {
+                return {
+                    content: [{ type: 'text', text: 'Message queue not available yet' }],
+                    isError: true,
+                };
+            }
+
+            const reminderText = args.task_id
+                ? `[Timer expired] Background task ${args.task_id} may be complete. Check its status.`
+                : args.message;
+
+            try {
+                // Use default mode if provided, otherwise create minimal mode
+                const mode = options.defaultMode ?? {} as T;
+                queue.push(reminderText, mode);
+
+                return {
+                    content: [{ type: 'text', text: `Reminder injected: "${reminderText}"` }],
+                    isError: false,
+                };
+            } catch (error) {
+                return {
+                    content: [{ type: 'text', text: `Failed to inject reminder: ${String(error)}` }],
+                    isError: true,
+                };
+            }
+        });
+    }
 
     const transport = new StreamableHTTPServerTransport({
         // NOTE: Returning session id here will result in claude
@@ -101,9 +154,15 @@ export async function startHappyServer(client: ApiSessionClient) {
         });
     });
 
+    // Build tool names list based on what's registered
+    const toolNames = ['change_title'];
+    if (options?.getMessageQueue) {
+        toolNames.push('inject_reminder');
+    }
+
     return {
         url: baseUrl.toString(),
-        toolNames: ['change_title'],
+        toolNames,
         stop: () => {
             logger.debug('[happyMCP] Stopping server');
             mcp.close();
